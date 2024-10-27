@@ -3,6 +3,9 @@ import { Observable } from "rxjs"
 import { distinctUntilChanged, pluck } from "rxjs/operators"
 import type { KeysMatching } from "~/types/ts-utils"
 import DispatchingStore, { defineDispatchers } from "./DispatchingStore"
+import { GraphQLSchema, GraphQLObjectType, GraphQLType, buildClientSchema, getIntrospectionQuery } from "graphql"
+import { ref } from "vue"
+import { buildQuery } from "~/helpers/graphql/queryBuilder"
 
 export const HoppBgColors = ["system", "light", "dark", "black"] as const
 
@@ -67,6 +70,8 @@ export type SettingsDef = {
 
   HAS_OPENED_SPOTLIGHT: boolean
   ENABLE_AI_EXPERIMENTS: boolean
+  // define the max_nesting_depth setting variable
+  max_nesting_depth: number
 }
 
 export const getDefaultSettings = (): SettingsDef => ({
@@ -115,7 +120,11 @@ export const getDefaultSettings = (): SettingsDef => ({
 
   HAS_OPENED_SPOTLIGHT: false,
   ENABLE_AI_EXPERIMENTS: true,
+
+  // default value for max_nesting_depth set to 3
+  max_nesting_depth: 3, 
 })
+
 
 type ApplySettingPayload = {
   [K in keyof SettingsDef]: {
@@ -133,6 +142,26 @@ type ApplyNestedSettingPayload = {
     }
   }[keyof SettingsDef[K]]
 }[KeysMatching<SettingsDef, Record<string, any>>]
+
+export const max_nesting_depth = ref(getDefaultSettings().max_nesting_depth)
+// function that gets and then parses graphql schema
+export async function fetchGraphQLSchema(endpoint: string): Promise<GraphQLSchema> {
+  const introspectionQuery = getIntrospectionQuery();
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query: introspectionQuery }),
+  });
+  // error handling
+  if (!response.ok) {
+    throw new Error("Error : failed when fetching GraphQL schema");
+  }
+  const result = await response.json();
+  // change introspection data to a schema
+  return buildClientSchema(result.data as IntrospectionQuery);
+}
 
 const dispatchers = defineDispatchers({
   bulkApplySettings(_currentState: SettingsDef, payload: Partial<SettingsDef>) {
@@ -154,6 +183,15 @@ const dispatchers = defineDispatchers({
 
     return result
   },
+  // allows the dispatchers to be able to handle the new max_nesting_depth setting
+  applySetting(
+    _currentState: SettingsDef, 
+    { settingKey, value }: ApplySettingPayload
+  ) {
+    const result: Partial<SettingsDef> = { [settingKey]: value }
+    if (settingKey === "max_nesting_depth") max_nesting_depth.value = value
+    return result
+  },
   toggleNestedSetting(
     currentState: SettingsDef,
     {
@@ -173,16 +211,6 @@ const dispatchers = defineDispatchers({
         ...currentState[settingKey],
         [property]: !currentState[settingKey][property],
       },
-    }
-
-    return result
-  },
-  applySetting(
-    _currentState: SettingsDef,
-    { settingKey, value }: ApplySettingPayload
-  ) {
-    const result: Partial<SettingsDef> = {
-      [settingKey]: value,
     }
 
     return result
@@ -233,17 +261,17 @@ export function toggleSetting(settingKey: KeysMatching<SettingsDef, boolean>) {
   })
 }
 
-export function toggleNestedSetting<
-  K extends KeysMatching<SettingsDef, Record<string, boolean>>,
-  P extends keyof SettingsDef[K],
->(settingKey: K, property: P) {
+// make the function to toggle the setting for maximum nesting depth avaiable for use by other files
+export function toggleNestedSetting<K extends KeysMatching<SettingsDef, Record<string, boolean>>, P extends keyof SettingsDef[K]>(
+  settingKey: K, 
+  property: P
+) {
   settingsStore.dispatch({
-    dispatcher: "toggleNestedSetting",
-    payload: {
-      settingKey,
-      // @ts-expect-error TS is not able to understand the type semantics here
-      property,
-    },
+    dispatcher: "toggleNestedSetting", 
+    payload: { 
+      settingKey, 
+      property 
+    } 
   })
 }
 
@@ -260,8 +288,9 @@ export function applySetting<K extends keyof SettingsDef>(
       value,
     },
   })
+  localStorage.setItem(settingKey, value.toString()) // enables persistance in localStorage (used for max_nesting_depth)
 }
-
+  
 export function applyNestedSetting<
   K extends KeysMatching<SettingsDef, Record<string, any>>,
   P extends keyof SettingsDef[K],
@@ -298,4 +327,18 @@ export function performSettingsDataMigrations(data: any): SettingsDef {
   const final = defaultsDeep(source, getDefaultSettings())
 
   return final
+}
+
+export function generateQuery(schema: GraphQLSchema, max_nesting_depth: number): string {
+  // error handling
+  if (!schema) {
+      throw new Error("Error: Schema not loaded");
+  }
+  // gets the query type from the schema
+  const queryType = schema.getQueryType();
+  // error handling
+  if (!queryType) {
+      throw new Error("Error: Query type not found in schema");
+  }
+  return buildQuery(queryType, max_nesting_depth);
 }
